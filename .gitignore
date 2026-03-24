@@ -1,11 +1,9 @@
 *
 !/.gitignore
-!/.env.example
 !/README.md
 !/requirements.txt
 !/run_experiment.py
 !/evaluate_results.py
-!/export_annotation_csv.py
 !/src/
 !/src/*.py
 !/Data/

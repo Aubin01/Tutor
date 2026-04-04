@@ -3,7 +3,7 @@
 This project evaluates how well LLM tutors avoid giving final math answers too early.
 It runs experiments, then computes leakage and compliance metrics.
 
-## Quick Start (Reviewer)
+## Quick Start
 
 From the project root:
 

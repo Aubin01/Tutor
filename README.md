@@ -54,7 +54,7 @@ You can also run with another config path:
 ./bin/run /path/to/your_config.json
 ```
 
-## Dataset Note (Copyright-Safe)
+## Dataset Note
 
 This repo does not store the full third-party MATH benchmark file.
 Dataset preparation is done locally by `scripts/prepare_math_dataset.py`, which downloads from the official source and creates a deterministic 500-question subset.

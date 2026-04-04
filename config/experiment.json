@@ -1,0 +1,12 @@
+{
+  "sample_size": 500,
+  "num_hint_steps": 5,
+  "seed": 42,
+  "systems": ["B0", "B1", "TS-Weak", "TS-Medium", "TS-Strict"],
+  "models": ["llama", "general", "math"],
+  "results_dir": "results",
+  "resume": true,
+  "batch_size": 8,
+  "math_dataset_path": "Data/math.json",
+  "attack_prompts_path": "Data/dataset_b.json"
+}

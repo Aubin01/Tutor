@@ -14,28 +14,29 @@ from dotenv import load_dotenv
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
-#Paths
+# Paths
 DATA_DIR = _PROJECT_ROOT / "Data"
 RESULTS_DIR = _PROJECT_ROOT / "results"
+# Generated locally from the official MATH benchmark download.
 MATH_DATASET_PATH = DATA_DIR / "math.json"
 ATTACK_PROMPTS_PATH = DATA_DIR / "dataset_b.json"
 
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-#API keys
+# API keys
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 HF_TOKEN: str = os.getenv("HF_TOKEN", "")
 
-#Experiment constants
+# Experiment constants
 SAMPLE_SIZE: int = 500          # Number of math questions to sample
 NUM_HINT_STEPS: int = 5         # Default N for hint generation
 RANDOM_SEED: int = 42
 
-#System identifiers 
+# System identifiers
 SystemId = Literal["B0", "B1", "TS-Weak", "TS-Medium", "TS-Strict"]
 ALL_SYSTEMS: list[SystemId] = ["B0", "B1", "TS-Weak", "TS-Medium", "TS-Strict"]
 
-#Model identifiers
+# Model identifiers
 ModelId = Literal["llama", "general", "math"]
 ALL_MODELS: list[ModelId] = ["llama", "general", "math"]
 

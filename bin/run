@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolve repository root from this script location.
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV_PY="$ROOT_DIR/.venv/bin/python"
+CONFIG_PATH="${1:-$ROOT_DIR/config/experiment.json}"
+
+if [[ ! -x "$VENV_PY" ]]; then
+  echo "Missing virtual environment at .venv. Run ./bin/install first."
+  exit 1
+fi
+
+if [[ ! -f "$CONFIG_PATH" ]]; then
+  echo "Config file not found: $CONFIG_PATH"
+  echo "Expected default: $ROOT_DIR/config/experiment.json"
+  exit 1
+fi
+
+echo "Running experiment with config: $CONFIG_PATH"
+"$VENV_PY" "$ROOT_DIR/scripts/run_experiment.py" --config "$CONFIG_PATH"
+
+echo "Running evaluation with config: $CONFIG_PATH"
+"$VENV_PY" "$ROOT_DIR/scripts/evaluate_results.py" --config "$CONFIG_PATH"
+
+echo "Run complete. Summary files:"
+echo "  Check summary.csv and summary.json under the results_dir in your config."

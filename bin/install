@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolve repository root from this script location.
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV_DIR="$ROOT_DIR/.venv"
+ENV_EXAMPLE="$ROOT_DIR/.env.example"
+ENV_FILE="$ROOT_DIR/.env"
+DEFAULT_CONFIG="$ROOT_DIR/config/experiment.json"
+MATH_DATASET="$ROOT_DIR/Data/math.json"
+
+if [[ ! -d "$VENV_DIR" ]]; then
+  python -m venv "$VENV_DIR"
+fi
+
+"$VENV_DIR/bin/pip" install --upgrade pip
+"$VENV_DIR/bin/pip" install -r "$ROOT_DIR/requirements.txt"
+
+if [[ -f "$ENV_EXAMPLE" && ! -f "$ENV_FILE" ]]; then
+  cp "$ENV_EXAMPLE" "$ENV_FILE"
+  echo "Created .env from .env.example"
+fi
+
+if [[ ! -f "$DEFAULT_CONFIG" ]]; then
+  echo "Missing config: $DEFAULT_CONFIG"
+  exit 1
+fi
+
+if [[ ! -f "$MATH_DATASET" ]]; then
+  echo "Building Data/math.json from official MATH source..."
+  "$VENV_DIR/bin/python" "$ROOT_DIR/scripts/prepare_math_dataset.py" --output "$MATH_DATASET"
+fi
+
+echo "Install complete."
+echo "Next: ./bin/run"

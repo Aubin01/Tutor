@@ -28,16 +28,93 @@ _ANSWER_MARKERS = [
     re.compile(r"=\s*\\boxed", re.I),
 ]
 
+_SIMPLE_VARIABLE = re.compile(r"^\s*(?:[a-zA-Z]|\\[a-zA-Z]+(?:\{[^}]+\})?)\s*$")
 
-def detect_leakage(output: str, gold_answer: str) -> dict[str, Any]:
-    """Check whether *output* leaks the gold answer (substring or marker)."""
+
+def _clean_candidate(text: str) -> str:
+    text = text.strip().rstrip(".;,")
+    if text.startswith("$") and text.endswith("$") and len(text) >= 2:
+        text = text[1:-1].strip()
+    if text.startswith(r"\(") and text.endswith(r"\)"):
+        text = text[2:-2].strip()
+    if text.startswith(r"\[") and text.endswith(r"\]"):
+        text = text[2:-2].strip()
+    return text.strip()
+
+
+def _last_segments(text: str, limit: int = 3) -> list[str]:
+    segments: list[str] = []
+
+    step_segments = _split_steps(text)
+    if step_segments:
+        segments.append(step_segments[-1])
+
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    segments.extend(lines[-limit:])
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for segment in segments:
+        if segment not in seen:
+            unique.append(segment)
+            seen.add(segment)
+    return unique
+
+
+def _segment_has_final_assignment(segment: str, gold_answer: str) -> bool:
+    for clause in re.split(r"[\n;]", segment):
+        if clause.count("=") != 1:
+            continue
+        lhs, rhs = (_clean_candidate(side) for side in clause.split("=", 1))
+        if answers_match(rhs, gold_answer) and _SIMPLE_VARIABLE.fullmatch(lhs):
+            return True
+        if answers_match(lhs, gold_answer) and _SIMPLE_VARIABLE.fullmatch(rhs):
+            return True
+    return False
+
+
+def _explicit_answer_match(output: str, gold_answer: str) -> bool:
+    for segment in _last_segments(output):
+        clean = _clean_candidate(segment)
+        if not clean:
+            continue
+
+        boxed = extract_boxed_answer(clean)
+        if boxed and answers_match(boxed, gold_answer):
+            return True
+
+        answer_line = _ANSWER_LINE.search(clean)
+        if answer_line and answers_match(_clean_candidate(answer_line.group(1)), gold_answer):
+            return True
+
+        therefore_line = _THEREFORE_LINE.search(clean)
+        if therefore_line:
+            tail = _clean_candidate(therefore_line.group(1))
+            if answers_match(tail, gold_answer) or _segment_has_final_assignment(tail, gold_answer):
+                return True
+
+        if normalize_answer(clean) == normalize_answer(gold_answer):
+            return True
+
+        if _segment_has_final_assignment(clean, gold_answer):
+            return True
+
+    return False
+
+
+def detect_leakage(output: str, gold_answer: str, problem_text: str = "") -> dict[str, Any]:
+    """Check whether *output* leaks the gold answer."""
     gold_found = contains_answer_span(output, gold_answer)
     markers = [p.pattern for p in _ANSWER_MARKERS if p.search(output)]
+    explicit_match = _explicit_answer_match(output, gold_answer)
+    prompt_contains_gold = contains_answer_span(problem_text, gold_answer) if problem_text else False
 
     return {
-        "leaked": gold_found or bool(markers),
+        "leaked": explicit_match or bool(markers),
         "gold_substring_match": gold_found,
         "marker_matches": markers,
+        "explicit_answer_match": explicit_match,
+        "prompt_contains_gold": prompt_contains_gold,
     }
 
 #  Step compliance
@@ -51,7 +128,12 @@ _COMPLIANCE_MARKERS = [
     re.compile(r"\btherefore\s+[a-z]\s*=", re.I),
 ]
 
-def check_step_compliance(output: str, gold_answer: str, max_steps: int = 5) -> dict:
+def check_step_compliance(
+    output: str,
+    gold_answer: str,
+    problem_text: str = "",
+    max_steps: int = 5,
+) -> dict:
     """Check if output has 1–N labelled steps and no answer markers."""
     reasons = []
 
@@ -66,15 +148,16 @@ def check_step_compliance(output: str, gold_answer: str, max_steps: int = 5) -> 
     if has_markers:
         reasons.append("answer_marker_present")
 
-    contains_gold = contains_answer_span(output, gold_answer)
-    if contains_gold:
-        reasons.append("gold_answer_in_output")
+    leak = detect_leakage(output, gold_answer, problem_text)
+    if leak["explicit_answer_match"]:
+        reasons.append("final_answer_revealed")
 
     return {
         "compliant": len(reasons) == 0,
         "num_steps": num_steps,
         "has_answer_markers": has_markers,
-        "contains_gold_answer": contains_gold,
+        "contains_gold_answer": leak["gold_substring_match"],
+        "reveals_final_answer": leak["explicit_answer_match"],
         "reasons": reasons,
     }
 

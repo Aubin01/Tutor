@@ -3,5 +3,6 @@ python-dotenv>=1.0.0
 transformers>=4.40.0
 torch>=2.0.0
 huggingface-hub>=0.23.0
+datasets>=2.19.0
 rouge-score>=0.1.2
 accelerate>=0.30.0

@@ -1,4 +1,6 @@
-"""data utilities, model wrappers, prompts, and pipeline."""
+"""
+Data loading, answer normalization, model wrappers, and tutoring pipeline logic.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +8,6 @@ import hashlib
 import json
 import logging
 import math
-import random
 import re
 import time
 from abc import ABC, abstractmethod
@@ -24,6 +25,8 @@ from .config import (
 )
 
 logger = logging.getLogger(__name__)
+_MATH_SIGNAL_RE = re.compile(r"(\\frac|\\sqrt|\\pi|\\cdot|\\times|=|\^|\d)")
+_LEVEL_RE = re.compile(r"(\d+)")
 
 # Data and answer helpers
 
@@ -42,34 +45,98 @@ def sample_questions(
     n: int = SAMPLE_SIZE,
     seed: int = RANDOM_SEED,
 ) -> list[dict]:
-    """Deterministic stratified sample by (type, level)."""
-    rng = random.Random(seed)
+    """
+    Deterministic stratified sample by (type, level).
+
+    The selection policy is deterministic (no random draw). The seed parameter is
+    kept for CLI/config backward compatibility.
+    """
+    _ = seed
     valid = [q for q in questions if str(q.get("level", "?")) != "?"]
 
     if n >= len(valid):
-        return valid
+        return sorted(valid, key=_question_quality_sort_key)
 
     strata: dict[tuple[str, str], list[dict]] = {}
     for q in valid:
         key = (q.get("type", ""), str(q.get("level", "")))
         strata.setdefault(key, []).append(q)
 
+    for key in strata:
+        strata[key] = sorted(strata[key], key=_question_quality_sort_key)
+
     total_valid = len(valid)
+    quotas: dict[tuple[str, str], int] = {}
+    remainder_rank: list[tuple[float, int, tuple[str, str]]] = []
+    allocated = 0
+
+    for key in sorted(strata):
+        group_size = len(strata[key])
+        raw_quota = n * group_size / total_valid
+        base_quota = int(math.floor(raw_quota))
+        quotas[key] = base_quota
+        allocated += base_quota
+        remainder_rank.append((raw_quota - base_quota, group_size, key))
+
+    shortfall = n - allocated
+    remainder_rank.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    for _, _, key in remainder_rank[:shortfall]:
+        quotas[key] += 1
+
     sampled: list[dict] = []
-    remainder_pool: list[dict] = []
-
-    for group in strata.values():
-        quota = int(math.floor(n * len(group) / total_valid))
-        rng.shuffle(group)
-        sampled.extend(group[:quota])
-        remainder_pool.extend(group[quota:])
-
-    shortfall = n - len(sampled)
-    if shortfall > 0:
-        rng.shuffle(remainder_pool)
-        sampled.extend(remainder_pool[:shortfall])
+    for key in sorted(strata):
+        take = quotas[key]
+        if take > 0:
+            sampled.extend(strata[key][:take])
 
     return sampled
+
+
+def _parse_level_number(level_value: Any) -> int | None:
+    text = str(level_value).strip()
+    match = _LEVEL_RE.search(text)
+    if not match:
+        return None
+    value = int(match.group(1))
+    if 1 <= value <= 5:
+        return value
+    return None
+
+
+def _question_quality_score(question: dict[str, Any]) -> int:
+    if "quality_score" in question:
+        try:
+            return int(question["quality_score"])
+        except (TypeError, ValueError):
+            pass
+
+    problem = str(question.get("problem", "")).strip()
+    solution = str(question.get("solution", "")).strip()
+    level = question.get("level", "")
+    problem_type = str(question.get("type", "")).strip()
+
+    score = 0
+    if "\\boxed{" in solution:
+        score += 30
+    if 40 <= len(problem) <= 5000:
+        score += 15
+    if 80 <= len(solution) <= 12000:
+        score += 20
+    if _parse_level_number(level) is not None:
+        score += 15
+    if problem_type:
+        score += 10
+    if _MATH_SIGNAL_RE.search(problem) and _MATH_SIGNAL_RE.search(solution):
+        score += 10
+
+    return score
+
+
+def _question_quality_sort_key(question: dict[str, Any]) -> tuple[int, str]:
+    return (
+        -_question_quality_score(question),
+        stable_question_uid(question["problem"], question["solution"]),
+    )
 
 
 def stable_question_uid(problem: str, solution: str) -> str:

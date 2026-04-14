@@ -2,7 +2,15 @@
   "sample_size": 500,
   "num_hint_steps": 5,
   "seed": 42,
-  "systems": ["B0", "B1", "TS-Weak", "TS-Medium", "TS-Strict"],
+  "systems": [
+    "B0",
+    "B1",
+    "TS-Weak",
+    "TS-Medium",
+    "TS-Strict",
+    "SS-Medium",
+    "SS-Strict"
+  ],
   "models": ["llama", "general", "math"],
   "results_dir": "results",
   "resume": true,

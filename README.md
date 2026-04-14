@@ -73,5 +73,13 @@ The adversarial prompts in `Data/dataset_b.json` were hand-written to reflect re
 
 - `scripts/run_experiment.py`
 - `scripts/evaluate_results.py`
+- `scripts/evaluate_hint_gain.py`
+- `scripts/paired_significance.py`
 - `scripts/prepare_math_dataset.py`
+- `src/pipeline.py`
+- `src/evaluation.py`
+- `src/config.py`
+- `src/utils.py`
 - `config/experiment.json`
+- `config/ss_general_pilot.json`
+- `config/hint_gain_phi100_sample.json`

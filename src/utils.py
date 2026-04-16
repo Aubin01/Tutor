@@ -1,7 +1,4 @@
-# utils.py -- Shared config, paths, constants, and JSONL reading.
-#
-# Other modules import from here to get project paths, model settings,
-# experiment defaults, and the JSONL line reader.
+"""Shared project settings: file paths, model configs, experiment defaults, and JSONL reading."""
 
 from __future__ import annotations
 
@@ -57,8 +54,8 @@ ALL_SYSTEMS: list[SystemId] = [
 ]
 
 # Model identifiers
-ModelId = Literal["llama", "general", "math"]
-ALL_MODELS: list[ModelId] = ["llama", "general", "math"]
+ModelId = Literal["llama", "general", "math", "deepseek-math"]
+ALL_MODELS: list[ModelId] = ["llama", "general", "math", "deepseek-math"]
 
 
 @dataclass
@@ -92,6 +89,13 @@ MODELS: dict[ModelId, ModelConfig] = {
         model_id="math",
         backend="huggingface",
         model_name="Qwen/Qwen2.5-Math-7B-Instruct",
+        temperature=0.3,
+        max_tokens=2048,
+    ),
+    "deepseek-math": ModelConfig(
+        model_id="deepseek-math",
+        backend="huggingface",
+        model_name="deepseek-ai/deepseek-math-7b-instruct",
         temperature=0.3,
         max_tokens=2048,
     ),

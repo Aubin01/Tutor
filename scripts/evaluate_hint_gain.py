@@ -1,8 +1,8 @@
-# evaluate_hint_gain.py -- Test if tutor hints help a separate solver model.
-#
-# Runs a solver (e.g. Phi-4-reasoning) on math problems twice:
-# once without hints, once with hints from each tutor system.
-# Compares solve rates to measure hint quality.
+"""Test if tutor hints help a solver model.
+
+Runs a solver (e.g. Phi-4-reasoning) on math problems with and without hints.
+Compares solve rates to measure hint quality.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +25,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.utils import ALL_SYSTEMS, RESULTS_DIR, ModelConfig, load_config, resolve_config_path, iter_jsonl_objects, PROJECT_ROOT
 from src.evaluation import verify_step_a
 from src.pipeline import load_model
+
+try:
+    from statsmodels.stats.contingency_tables import mcnemar
+    HAS_STATSMODELS = True
+except ImportError:
+    HAS_STATSMODELS = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -234,12 +240,40 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
         else None
     )
 
-    return {
+    result = {
         "n": len(records),
         "no_hint_solve_rate": no_hint_rate,
         "hinted_solve_rate": hinted_rate,
         "hint_gain": hint_gain,
     }
+
+    # McNemar's exact test on paired (no_hint_correct, hinted_correct)
+    if HAS_STATSMODELS:
+        paired = [
+            (bool(r["eval_no_hint_solve_correct"]), bool(r["eval_hinted_solve_correct"]))
+            for r in records
+            if r.get("eval_no_hint_solve_correct") is not None
+            and r.get("eval_hinted_solve_correct") is not None
+        ]
+        if paired:
+            # 2×2 contingency: [[both_correct, helped], [hurt, both_wrong]]
+            both_correct = sum(1 for a, b in paired if a and b)
+            helped = sum(1 for a, b in paired if not a and b)      # no-hint wrong, hinted correct
+            hurt = sum(1 for a, b in paired if a and not b)        # no-hint correct, hinted wrong
+            both_wrong = sum(1 for a, b in paired if not a and not b)
+            table = [[both_correct, hurt], [helped, both_wrong]]
+            try:
+                bunch = mcnemar(table, exact=True)
+                result["mcnemar_p"] = bunch.pvalue
+                result["mcnemar_statistic"] = bunch.statistic
+            except Exception as exc:
+                logger.warning("McNemar test failed: %s", exc)
+            result["n_helped"] = helped
+            result["n_hurt"] = hurt
+            result["n_both_correct"] = both_correct
+            result["n_both_wrong"] = both_wrong
+
+    return result
 
 
 def _format_percent(value: float | None) -> str:
@@ -259,10 +293,18 @@ def _load_solver(args: argparse.Namespace):
     return load_model(model_config)
 
 
+def _format_pvalue(p: float | None) -> str:
+    if p is None:
+        return "  -  "
+    if p < 0.001:
+        return " <0.001"
+    return f"{p:7.4f}"
+
+
 def print_summary_table(all_aggs: dict[str, dict[str, Any]]) -> None:
     header = (
         f"{'Condition':<25}  {'N':>5}  {'NoHint%':>8}  "
-        f"{'Hinted%':>8}  {'Gain':>8}"
+        f"{'Hinted%':>8}  {'Gain':>8}  {'Helped':>7}  {'Hurt':>5}  {'McNem p':>8}"
     )
     print("\n" + "=" * len(header))
     print(header)
@@ -272,7 +314,10 @@ def print_summary_table(all_aggs: dict[str, dict[str, Any]]) -> None:
             f"{condition:<25}  {agg['n']:>5}  "
             f"{_format_percent(agg.get('no_hint_solve_rate')):>8}  "
             f"{_format_percent(agg.get('hinted_solve_rate')):>8}  "
-            f"{_format_percent(agg.get('hint_gain')):>8}"
+            f"{_format_percent(agg.get('hint_gain')):>8}  "
+            f"{agg.get('n_helped', '-'):>7}  "
+            f"{agg.get('n_hurt', '-'):>5}  "
+            f"{_format_pvalue(agg.get('mcnemar_p')):>8}"
         )
     print("=" * len(header))
 
@@ -284,6 +329,12 @@ def save_summary_csv(all_aggs: dict[str, dict[str, Any]], path: Path) -> None:
         "no_hint_solve_rate",
         "hinted_solve_rate",
         "hint_gain",
+        "n_helped",
+        "n_hurt",
+        "n_both_correct",
+        "n_both_wrong",
+        "mcnemar_statistic",
+        "mcnemar_p",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:

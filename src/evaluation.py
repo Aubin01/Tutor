@@ -1,20 +1,18 @@
-"""
-Evaluation metrics: leakage detection, step compliance,
-ROUGE-L metrics, and Step A correctness filtering.
-"""
+"""Leakage detection, compliance checking, ROUGE overlap metrics, and bootstrap CIs."""
 
 from __future__ import annotations
 
 import re
 from typing import Any
 
+import numpy as np
 from rouge_score import rouge_scorer
 
 from .pipeline import normalize_answer, extract_boxed_answer, answers_match, contains_answer_span
 
 _rouge = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
 
-#  Leakage detection
+# --- Leakage detection ---
 
 _ANSWER_MARKERS = [
     re.compile(r"\banswer\s*[:=]\s*", re.I),
@@ -102,37 +100,69 @@ def _explicit_answer_match(output: str, gold_answer: str) -> bool:
     return False
 
 
-def detect_leakage(output: str, gold_answer: str, problem_text: str = "") -> dict[str, Any]:
-    """Check whether *output* leaks the gold answer."""
+def detect_leakage(
+    output: str,
+    gold_answer: str,
+    problem_text: str = "",
+    *,
+    step_a_output: str | None = None,
+) -> dict[str, Any]:
+    """Check whether *output* leaks the gold answer.
+
+    Returns a tiered label:
+      explicit_leak    – final answer revealed or mathematically equivalent
+      format_violation – answer-style markers present, no confirmed leak
+      clean            – none of the above
+
+    Near-leak is a semantic category (how much thinking remains) that
+    requires human judgment.  FSS is still computed and returned as a
+    continuous overlap metric but is not used for tier assignment.
+    """
     gold_found = contains_answer_span(output, gold_answer)
     markers = [p.pattern for p in _ANSWER_MARKERS if p.search(output)]
     explicit_match = _explicit_answer_match(output, gold_answer)
-    prompt_contains_gold = contains_answer_span(problem_text, gold_answer) if problem_text else False
+    prompt_contains_gold = (
+        contains_answer_span(problem_text, gold_answer) if problem_text else False
+    )
+
+    # Near-leak: high FSS against Step A (if available)
+    fss = None
+    if step_a_output:
+        fss = final_step_similarity(output, step_a_output)
+
+    # Tier assignment (most severe first)
+    if explicit_match:
+        tier = "explicit_leak"
+    elif markers:
+        tier = "format_violation"
+    else:
+        tier = "clean"
 
     return {
-        "leaked": explicit_match or bool(markers),
+        "leak_tier": tier,
+        # Binary shorthand: True iff the final answer was explicitly revealed
+        "leaked": tier == "explicit_leak",
         "gold_substring_match": gold_found,
         "marker_matches": markers,
         "explicit_answer_match": explicit_match,
+        "near_leak_fss": fss,
         "prompt_contains_gold": prompt_contains_gold,
     }
 
-#  Step compliance
+# --- Step compliance ---
 
 _STEP_LABEL = re.compile(r"(?:^|\n)\s*(?:step|hint)?\s*(\d+)\s*[.:)\-]", re.I)
 
-_COMPLIANCE_MARKERS = [
-    re.compile(r"\banswer\s*[:=]", re.I),
-    re.compile(r"\\boxed\{", re.I),
-    re.compile(r"\bthe\s+answer\s+is\b", re.I),
-    re.compile(r"\btherefore\s+[a-z]\s*=", re.I),
-]
+# Use the same marker list as leakage detection for consistency
+_COMPLIANCE_MARKERS = _ANSWER_MARKERS
 
 def check_step_compliance(
     output: str,
     gold_answer: str,
     problem_text: str = "",
     max_steps: int = 5,
+    *,
+    step_a_output: str | None = None,
 ) -> dict:
     """Check if output has 1–N labelled steps and no answer markers."""
     reasons = []
@@ -148,7 +178,7 @@ def check_step_compliance(
     if has_markers:
         reasons.append("answer_marker_present")
 
-    leak = detect_leakage(output, gold_answer, problem_text)
+    leak = detect_leakage(output, gold_answer, problem_text, step_a_output=step_a_output)
     if leak["explicit_answer_match"]:
         reasons.append("final_answer_revealed")
 
@@ -158,10 +188,11 @@ def check_step_compliance(
         "has_answer_markers": has_markers,
         "contains_gold_answer": leak["gold_substring_match"],
         "reveals_final_answer": leak["explicit_answer_match"],
+        "leak_tier": leak["leak_tier"],
         "reasons": reasons,
     }
 
-#  Step A correctness filter
+# --- Step A answer extraction ---
 
 
 _ANSWER_LINE = re.compile(
@@ -219,7 +250,7 @@ def verify_step_a(step_a_output: str, gold_answer: str) -> dict:
         "gold_answer_normalized": normalize_answer(gold_answer),
     }
 
-#  ROUGE-L metrics
+# --- ROUGE-L overlap metrics ---
 
 def _rouge_l(a: str, b: str) -> float:
     if not a.strip() or not b.strip():
@@ -271,3 +302,27 @@ def intermediate_step_coverage(hints: str, full_solution: str) -> dict:
         "final_step_coverage": per_step[-1],
         "per_step": per_step,
     }
+
+
+# --- Bootstrap confidence intervals ---
+
+def bootstrap_ci(
+    values: list[float | bool],
+    n_boot: int = 10_000,
+    alpha: float = 0.05,
+    seed: int = 42,
+) -> dict[str, float]:
+    """Return mean and percentile bootstrap CI for a list of values.
+
+    Works for both proportions (bool/0-1) and continuous metrics.
+    """
+    arr = np.asarray(values, dtype=float)
+    if len(arr) == 0:
+        return {"mean": float("nan"), "ci_lo": float("nan"), "ci_hi": float("nan")}
+    rng = np.random.default_rng(seed)
+    boot_means = np.array(
+        [arr[rng.integers(0, len(arr), size=len(arr))].mean() for _ in range(n_boot)]
+    )
+    lo = float(np.percentile(boot_means, 100 * alpha / 2))
+    hi = float(np.percentile(boot_means, 100 * (1 - alpha / 2)))
+    return {"mean": float(arr.mean()), "ci_lo": lo, "ci_hi": hi}

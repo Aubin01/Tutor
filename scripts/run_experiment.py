@@ -1,14 +1,14 @@
-# run_experiment.py -- Main experiment runner.
-#
-# Generates model outputs for every (model x system x question x prompt)
-# combination and saves results as JSONL files.
-#
-# Usage:
-#   python scripts/run_experiment.py                       # all conditions
-#   python scripts/run_experiment.py --systems B0 B1       # baselines only
-#   python scripts/run_experiment.py --models general      # one model
-#   python scripts/run_experiment.py --sample-size 50      # quick test
-#   python scripts/run_experiment.py --config config/experiment.json
+"""Main experiment script.
+
+Runs each model on each system for every question and attack prompt.
+Saves results as JSONL files under the results directory.
+
+Usage:
+    python scripts/run_experiment.py
+    python scripts/run_experiment.py --systems B0 B1
+    python scripts/run_experiment.py --models general
+    python scripts/run_experiment.py --config config/experiment.json
+"""
 
 from __future__ import annotations
 

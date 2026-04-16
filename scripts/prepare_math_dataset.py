@@ -1,18 +1,9 @@
 #!/usr/bin/env python3
-"""
-Build a local deterministic pilot dataset from an official MATH benchmark download.
+"""Download and format math problems from the MATH benchmark into a local JSON file.
 
-Default source:
-  Hugging Face dataset `qwedsacf/competition_math` (official link from
-  hendrycks/math README).
-
-The output schema matches the experiment loader in this repository:
-  problem, solution, level, type
-
-Sampling policy:
-  - Use original MATH labels (`type`, `level`).
-  - Build a 500-item pilot set stratified by (type, level) by default.
-  - Selection is deterministic (no random draws).
+Default source: Hugging Face dataset 'qwedsacf/competition_math'.
+Output schema: problem, solution, level, type.
+Produces a 500-problem stratified sample by default.
 """
 
 from __future__ import annotations

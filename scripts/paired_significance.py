@@ -1,16 +1,13 @@
-# paired_significance.py -- Post-evaluation paired statistical tests.
-#
-# This consumes *_evaluated.jsonl files produced by scripts/evaluate_results.py.
-# It does not recompute leakage, compliance, or ROUGE metrics.
-#
-# Tests:
-#   - record aggregation: exact McNemar test over aligned attack records
-#   - question aggregation: Wilcoxon signed-rank test over per-question counts
-#
-# All reported p-values are Holm-Bonferroni corrected across generated rows.
-#
-# Usage:
-#   python scripts/paired_significance.py --results-dir results
+"""Paired statistical tests on evaluated results.
+
+Compares systems using McNemar (record-level) and Wilcoxon signed-rank
+(question-level) tests. All p-values are Holm-Bonferroni corrected.
+
+Reads *_evaluated.jsonl files produced by evaluate_results.py.
+
+Usage:
+    python scripts/paired_significance.py --results-dir results
+"""
 
 from __future__ import annotations
 

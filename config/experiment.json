@@ -16,5 +16,7 @@
   "resume": true,
   "batch_size": 8,
   "math_dataset_path": "Data/math.json",
-  "attack_prompts_path": "Data/dataset_b.json"
+  "attack_prompts_path": "Data/dataset_b.json",
+  "hint_gain_sample_size": 100,
+  "hint_gain_sample_seed": 13
 }

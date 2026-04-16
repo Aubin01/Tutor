@@ -1,6 +1,4 @@
-"""
-Evaluate raw JSONL experiment outputs and write annotated summaries.
-"""
+"""Evaluate experiment outputs: annotate each record with leakage and compliance metrics, then summarize."""
 
 from __future__ import annotations
 
@@ -14,8 +12,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.config import ALL_SYSTEMS, RESULTS_DIR
+from src.utils import (
+    ALL_SYSTEMS,
+    RESULTS_DIR,
+    iter_jsonl_objects,
+    load_config,
+    resolve_config_path,
+)
 from src.evaluation import (
+    bootstrap_ci,
     check_step_compliance,
     detect_leakage,
     final_step_similarity,
@@ -31,17 +36,14 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def load_results(path: Path) -> list[dict]:
-    records = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-    return records
+    """Load JSONL result records, skipping damaged lines when needed."""
+    return [
+        record
+        for _, record in iter_jsonl_objects(path, logger=logger, label=str(path))
+    ]
 
 
 def mean_metric(records: list[dict], key: str) -> float | None:
@@ -56,14 +58,16 @@ def annotate_record(record: dict) -> dict:
     problem = record.get("problem", "")
     step_a = record.get("step_a_output")
 
-    leak = detect_leakage(output, gold, problem)
+    leak = detect_leakage(output, gold, problem, step_a_output=step_a)
     record["eval_leaked"] = leak["leaked"]
+    record["eval_leak_tier"] = leak["leak_tier"]
     record["eval_gold_substring_match"] = leak["gold_substring_match"]
     record["eval_marker_matches"] = leak["marker_matches"]
     record["eval_explicit_answer_match"] = leak["explicit_answer_match"]
+    record["eval_near_leak_fss"] = leak["near_leak_fss"]
     record["eval_prompt_contains_gold"] = leak["prompt_contains_gold"]
 
-    compliance = check_step_compliance(output, gold, problem)
+    compliance = check_step_compliance(output, gold, problem, step_a_output=step_a)
     record["eval_compliant"] = compliance["compliant"]
     record["eval_num_steps"] = compliance["num_steps"]
     record["eval_compliance_reasons"] = compliance["reasons"]
@@ -93,26 +97,47 @@ def aggregate(records: list[dict]) -> dict:
     if not records:
         return {}
 
+    # Use every generated record. Earlier versions excluded records when the
+    # problem text contained the gold answer span, but that incorrectly removed
+    # ordinary math problems such as "2x + 3 = 4" when the answer was "3".
+    clean_records = records
+    n_poisoned = 0
+
     step_a_values = [
         record["eval_step_a_correct"]
-        for record in records
+        for record in clean_records
         if record.get("eval_step_a_correct") is not None
     ]
 
     if step_a_values:
         step_a_accuracy = sum(step_a_values) / len(step_a_values)
         filtered_records = [
-            record for record in records if record.get("eval_step_a_correct") is True
+            record for record in clean_records if record.get("eval_step_a_correct") is True
         ]
     else:
         step_a_accuracy = None
-        filtered_records = records
+        filtered_records = clean_records
+
+    tiers = [r.get("eval_leak_tier", "clean") for r in clean_records]
+    n = len(clean_records)
+    explicit_flags = [t == "explicit_leak" for t in tiers]
+    format_flags = [t == "format_violation" for t in tiers]
+    answer_giving_flags = [t in ("explicit_leak", "format_violation") for t in tiers]
+
+    explicit_ci = bootstrap_ci(explicit_flags)
 
     summary = {
         "n": len(records),
+        "n_prompt_contains_gold": n_poisoned,
+        "n_clean": n,
         "n_after_step_a_filter": len(filtered_records),
-        "leakage_rate": mean_metric(records, "eval_leaked"),
-        "compliance_rate": mean_metric(records, "eval_compliant"),
+        "explicit_leak_rate": explicit_ci,
+        "format_violation_rate": bootstrap_ci(format_flags),
+        "answer_giving_rate": bootstrap_ci(answer_giving_flags),
+        "leakage_rate": explicit_ci,
+        "compliance_rate": bootstrap_ci(
+            [r.get("eval_compliant", False) for r in clean_records]
+        ),
         "solution_revelation_ratio": mean_metric(
             filtered_records, "eval_solution_revelation_ratio"
         ),
@@ -128,29 +153,47 @@ def aggregate(records: list[dict]) -> dict:
         summary["step_a_exclusion_rate"] = 1.0 - step_a_accuracy
 
     by_category: defaultdict[str, list[dict]] = defaultdict(list)
-    for record in records:
+    for record in clean_records:
         by_category[record.get("attack_category", "unknown")].append(record)
 
     summary["by_attack_category"] = {
         category: {
-            "n": len(category_records),
-            "leakage_rate": mean_metric(category_records, "eval_leaked"),
+            "n": len(cat_recs),
+            "explicit_leak_rate": bootstrap_ci(
+                [r.get("eval_leak_tier") == "explicit_leak" for r in cat_recs]
+            ),
         }
-        for category, category_records in sorted(by_category.items())
+        for category, cat_recs in sorted(by_category.items())
     }
     return summary
 
 
-def format_metric(value: float | None, percent: bool = False) -> str:
+def format_metric(value: float | dict | None, percent: bool = False) -> str:
     if value is None:
         return "  -  "
+    if isinstance(value, dict) and "mean" in value:
+        m = value["mean"]
+        lo, hi = value["ci_lo"], value["ci_hi"]
+        if percent:
+            return f"{m*100:5.1f}% [{lo*100:.1f},{hi*100:.1f}]"
+        return f"{m:.3f} [{lo:.3f},{hi:.3f}]"
     return f"{value * 100:5.1f}%" if percent else f"{value:5.3f}"
+
+
+def _rate_point(value: float | dict | None) -> float | None:
+    """Extract point estimate from either a scalar or a bootstrap_ci dict."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get("mean")
+    return value
 
 
 def print_summary_table(all_aggs: dict[str, dict]) -> None:
     """Print a comparison table across all evaluated conditions."""
     header = (
-        f"{'Condition':<25}  {'N':>5}  {'Leak%':>6}  {'Comply%':>7}  "
+        f"{'Condition':<25}  {'N':>5}  {'Explicit%':>18}  "
+        f"{'FmtViol%':>18}  {'AnsGive%':>18}  {'Comply%':>18}  "
         f"{'SRR':>5}  {'FSS':>5}  {'ReaCov':>6}  {'FinCov':>6}  {'SA-Acc':>6}"
     )
     print("\n" + "=" * len(header))
@@ -159,9 +202,11 @@ def print_summary_table(all_aggs: dict[str, dict]) -> None:
 
     for condition, agg in sorted(all_aggs.items()):
         print(
-            f"{condition:<25}  {agg['n']:>5}  "
-            f"{format_metric(agg.get('leakage_rate'), True):>6}  "
-            f"{format_metric(agg.get('compliance_rate'), True):>7}  "
+            f"{condition:<25}  {agg.get('n_clean', agg['n']):>5}  "
+            f"{format_metric(agg.get('explicit_leak_rate'), True):>18}  "
+            f"{format_metric(agg.get('format_violation_rate'), True):>18}  "
+            f"{format_metric(agg.get('answer_giving_rate'), True):>18}  "
+            f"{format_metric(agg.get('compliance_rate'), True):>18}  "
             f"{format_metric(agg.get('solution_revelation_ratio')):>5}  "
             f"{format_metric(agg.get('final_step_similarity')):>5}  "
             f"{format_metric(agg.get('reasoning_coverage')):>6}  "
@@ -170,16 +215,16 @@ def print_summary_table(all_aggs: dict[str, dict]) -> None:
         )
 
     print("=" * len(header))
-    print("\nLeakage Rate by Attack Category")
+    print("\nExplicit Leak Rate by Attack Category")
     for condition, agg in sorted(all_aggs.items()):
         categories = agg.get("by_attack_category", {})
         if not categories:
             continue
-        parts = [
-            f"{category}: {values['leakage_rate'] * 100:.0f}%"
-            for category, values in categories.items()
-            if values["leakage_rate"] is not None
-        ]
+        parts = []
+        for category, values in categories.items():
+            rate = _rate_point(values.get("explicit_leak_rate"))
+            if rate is not None:
+                parts.append(f"{category}: {rate * 100:.0f}%")
         print(f"  {condition:<20}  {', '.join(parts)}")
 
 
@@ -188,6 +233,15 @@ def save_summary_csv(all_aggs: dict[str, dict], path: Path) -> None:
     fields = [
         "condition",
         "n",
+        "n_prompt_contains_gold",
+        "n_clean",
+        "explicit_leak_rate",
+        "explicit_leak_ci_lo",
+        "explicit_leak_ci_hi",
+        "format_violation_rate",
+        "answer_giving_rate",
+        "answer_giving_ci_lo",
+        "answer_giving_ci_hi",
         "leakage_rate",
         "compliance_rate",
         "solution_revelation_ratio",
@@ -196,45 +250,35 @@ def save_summary_csv(all_aggs: dict[str, dict], path: Path) -> None:
         "final_step_coverage",
         "step_a_accuracy",
     ]
+
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for condition, agg in sorted(all_aggs.items()):
+            elr = agg.get("explicit_leak_rate", {})
+            agr = agg.get("answer_giving_rate", {})
             row = {
                 "condition": condition,
-                **{field: agg.get(field) for field in fields if field != "condition"},
+                "n": agg.get("n"),
+                "n_prompt_contains_gold": agg.get("n_prompt_contains_gold", 0),
+                "n_clean": agg.get("n_clean"),
+                "explicit_leak_rate": _rate_point(elr),
+                "explicit_leak_ci_lo": elr.get("ci_lo") if isinstance(elr, dict) else None,
+                "explicit_leak_ci_hi": elr.get("ci_hi") if isinstance(elr, dict) else None,
+                "format_violation_rate": _rate_point(agg.get("format_violation_rate")),
+                "answer_giving_rate": _rate_point(agr),
+                "answer_giving_ci_lo": agr.get("ci_lo") if isinstance(agr, dict) else None,
+                "answer_giving_ci_hi": agr.get("ci_hi") if isinstance(agr, dict) else None,
+                "leakage_rate": _rate_point(agg.get("leakage_rate")),
+                "compliance_rate": _rate_point(agg.get("compliance_rate")),
+                "solution_revelation_ratio": agg.get("solution_revelation_ratio"),
+                "final_step_similarity": agg.get("final_step_similarity"),
+                "reasoning_coverage": agg.get("reasoning_coverage"),
+                "final_step_coverage": agg.get("final_step_coverage"),
+                "step_a_accuracy": agg.get("step_a_accuracy"),
             }
             writer.writerow(row)
     logger.info("Summary CSV saved to %s", path)
-
-
-def _load_config(config_path: Path | None) -> tuple[dict[str, object], Path]:
-    if config_path is None:
-        return {}, Path(__file__).resolve().parent
-
-    path = config_path.expanduser().resolve()
-    if not path.exists():
-        raise ValueError(f"config file not found: {path}")
-
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    if not isinstance(data, dict):
-        raise ValueError(f"Config file must contain a JSON object: {path}")
-
-    return data, path.parent
-
-
-def _resolve_config_path(value: str | Path, base_dir: Path) -> Path:
-    path = Path(value).expanduser()
-    if path.is_absolute():
-        return path
-    # Bare relative paths in config are resolved from project root
-    # (e.g., "results" -> <repo>/results).
-    # Use "./" or "../" in config when you explicitly want config-file-relative paths.
-    if path.parts and path.parts[0] in (".", ".."):
-        return (base_dir / path).resolve()
-    return (PROJECT_ROOT / path).resolve()
 
 
 def main() -> None:
@@ -249,12 +293,12 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        config_data, config_base = _load_config(args.config)
+        config_data, config_base = load_config(args.config)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         parser.error(str(exc))
 
     results_dir: Path = (
-        _resolve_config_path(config_data["results_dir"], config_base)
+        resolve_config_path(config_data["results_dir"], config_base)
         if "results_dir" in config_data
         else args.results_dir
     )

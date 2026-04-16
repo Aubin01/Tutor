@@ -1,8 +1,4 @@
-# pipeline.py -- Data loading, answer matching, model wrappers, and prompt logic.
-#
-# Loads math questions and attack prompts, normalizes answers,
-# wraps OpenAI and HuggingFace models, builds prompts for each
-# system (B0, B1, TS-*, SS-*), and runs the two-step pipeline.
+"""Data loading, answer matching, model wrappers, prompt templates, and pipeline execution."""
 
 from __future__ import annotations
 

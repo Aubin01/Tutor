@@ -10,15 +10,12 @@ From the project root:
 ./bin/install
 ./bin/run
 ```
-
-That is the full workflow.
-
 ## What These Commands Do
 
 - `./bin/install`
   - creates `.venv`
   - installs dependencies
-  - builds `Data/math.json` (500-question local dataset)
+  - builds `Data/math.json` (500-problem local dataset)
 
 - `./bin/run`
   - runs `scripts/run_experiment.py`
@@ -56,7 +53,7 @@ You can also run with another config path:
 ## Dataset Note
 
 This repo does not store the full third-party MATH benchmark file.
-Dataset preparation is done locally by `scripts/prepare_math_dataset.py`, which downloads from the official source and creates a deterministic 500-question subset.
+Dataset preparation is done locally by `scripts/prepare_math_dataset.py`, which downloads from the official source and creates a deterministic 500-problem subset.
 
 If you need to rebuild it manually:
 
@@ -64,18 +61,11 @@ If you need to rebuild it manually:
 python scripts/prepare_math_dataset.py
 ```
 
-## Adversarial Prompts
+## Student Prompts
 
-The adversarial prompts in `Data/dataset_b.json` were hand-written to reflect realistic student pressure tactics in tutoring chats (for example: direct answer requests, exam-time urgency, yes/no confirmation, and instruction override attempts). We used these prompts to test whether the tutor policy still avoids final-answer leakage under plausible user behavior, not only under cooperative prompts.
+The student prompts in `Data/dataset_b.json` were hand-written to reflect realistic student pressure tactics in tutoring chats (for example: direct answer requests, exam-time urgency, yes/no confirmation, and instruction override attempts). We used these prompts to test whether the tutor policy still avoids final-answer leakage under plausible user behavior, not only under cooperative prompts.
 
-## Project Files
+## Paper: Strong Solvers, Leaky Tutors: Evaluating Answer Leakage in LLM Math Tutors
 
-- `scripts/run_experiment.py`
-- `scripts/evaluate_results.py`
-- `scripts/evaluate_hint_gain.py`
-- `scripts/paired_significance.py`
-- `scripts/prepare_math_dataset.py`
-- `src/pipeline.py`
-- `src/evaluation.py`
-- `src/utils.py`
-- `config/experiment.json`
+Aubin Mugisha and Behrooz Mansouri<br>
+University of Southern Maine

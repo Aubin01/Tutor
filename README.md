@@ -1,7 +1,6 @@
 # Tutor
 
-This project evaluates how well LLM tutors avoid giving final math answers too early.
-It runs experiments, then computes leakage and compliance metrics.
+Tutor contains the code and experimental pipeline for Strong Solvers, Leaky Tutors: Evaluating Answer Leakage in LLM Math Tutors. The project evaluates whether large language models can use mathematical solution context to generate pedagogical hints while withholding final answers.
 
 ## Quick Start
 

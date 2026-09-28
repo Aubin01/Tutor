@@ -21,6 +21,9 @@ DEFAULT_HF_SPLIT = "train"
 REQUIRED_FIELDS = {"problem", "solution", "level"}
 MATH_SIGNAL_RE = re.compile(r"(\\frac|\\sqrt|\\pi|\\cdot|\\times|=|\^|\d)")
 LEVEL_RE = re.compile(r"(\d+)")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "Data" / "math.json"
+
 
 def normalize_record(
     record: dict[str, Any],
@@ -218,8 +221,8 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("Data/math.json"),
-        help="Where to write the pilot JSON output (default: Data/math.json).",
+        default=DEFAULT_OUTPUT_PATH,
+        help="Where to write the pilot JSON output (default: <repo>/Data/math.json).",
     )
     parser.add_argument(
         "--dataset-id",

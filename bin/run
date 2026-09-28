@@ -17,6 +17,23 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
   exit 1
 fi
 
+# Hold a separate workflow lock through generation and evaluation.
+RUN_RESULTS_DIR="$("$VENV_PY" -c '
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from src.utils import load_config, resolve_config_path, RESULTS_DIR
+config, base = load_config(Path(sys.argv[2]))
+print(resolve_config_path(config.get("results_dir", RESULTS_DIR), base))
+' "$ROOT_DIR" "$CONFIG_PATH")"
+mkdir -p "$RUN_RESULTS_DIR"
+exec 9>"$RUN_RESULTS_DIR/.workflow.lock"
+if ! flock -n 9; then
+  echo "Another workflow is already using $RUN_RESULTS_DIR. Attach to that run instead."
+  exit 1
+fi
+export PYTHONUNBUFFERED=1
+
 echo "Running experiment with config: $CONFIG_PATH"
 "$VENV_PY" "$ROOT_DIR/scripts/run_experiment.py" --config "$CONFIG_PATH"
 
@@ -24,4 +41,4 @@ echo "Running evaluation with config: $CONFIG_PATH"
 "$VENV_PY" "$ROOT_DIR/scripts/evaluate_results.py" --config "$CONFIG_PATH"
 
 echo "Run complete. Summary files:"
-echo "  Check summary.csv and summary.json under the results_dir in your config."
+echo "  Check summary.csv and summary.json under the configured results_dir."

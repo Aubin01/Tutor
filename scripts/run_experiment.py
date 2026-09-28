@@ -15,14 +15,16 @@ from __future__ import annotations
 import argparse
 import csv
 import errno
+import fcntl
+import hashlib
 import json
 import logging
 import os
 import shutil
 import sys
-import time
 import warnings
 from pathlib import Path
+from contextlib import contextmanager
 from typing import Any
 
 # Silence noisy HuggingFace / torch warnings
@@ -37,7 +39,7 @@ transformers.logging.set_verbosity_error()
 from tqdm import tqdm
 
 # --- Make project importable from repo root ---
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.utils import (
     ALL_MODELS,
@@ -51,7 +53,7 @@ from src.utils import (
     iter_jsonl_objects,
     load_config,
     resolve_config_path,
-    PROJECT_ROOT,
+    systems_for_model,
 )
 from src.pipeline import (
     build_test_cases,
@@ -61,7 +63,6 @@ from src.pipeline import (
     load_model,
     run_system_batch,
 )
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -105,11 +106,8 @@ def _make_case_key(question_uid: str | None, question_idx: Any, attack_id: Any) 
 
 
 def _candidate_case_keys(question_uid: str | None, question_idx: Any, attack_id: Any) -> set[str]:
-    """All keys that can represent the same case (new + legacy)."""
-    keys = {_legacy_case_key(question_idx, attack_id)}
-    if question_uid:
-        keys.add(f"{question_uid}_{attack_id}")
-    return keys
+    """Never equate different questions by row index when a stable ID exists."""
+    return {_make_case_key(question_uid, question_idx, attack_id)}
 
 
 def _step_a_case_key(case: dict[str, Any]) -> str:
@@ -130,6 +128,8 @@ def _load_existing_keys(path: Path) -> set[str]:
         for _, rec in iter_jsonl_objects(path, logger=logger, label=str(path)):
             attack_id = rec.get("attack_id")
             if attack_id is None:
+                continue
+            if not isinstance(rec.get("output"), str) or not rec["output"].strip():
                 continue
 
             q_idx = rec.get("question_idx")
@@ -174,9 +174,22 @@ def _raise_if_storage_exhausted(path: Path, exc: OSError) -> None:
 
 
 def _append_result(path: Path, result: dict) -> None:
+    if not isinstance(result.get("output"), str) or not result["output"].strip():
+        raise ValueError("Refusing to checkpoint an empty model response")
+    _append_checkpoint(path, result)
+
+
+def _append_checkpoint(path: Path, record: dict) -> None:
+    """Persist one record and isolate a partial last line left by interruption."""
     try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(result, ensure_ascii=False) + "\n")
+        with open(path, "a+b") as f:
+            if f.tell():
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    f.write(b"\n")
+            f.write((json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
     except OSError as exc:
         _raise_if_storage_exhausted(path, exc)
         raise
@@ -201,12 +214,7 @@ def _append_step_a_cache(path: Path, question_key: str, step_a_output: str) -> N
         "question_key": question_key,
         "step_a_output": step_a_output,
     }
-    try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except OSError as exc:
-        _raise_if_storage_exhausted(path, exc)
-        raise
+    _append_checkpoint(path, rec)
 
 
 def _recover_step_a_cache(
@@ -230,7 +238,8 @@ def _recover_step_a_cache(
             if not step_a_output:
                 continue
 
-            question_key = str(rec.get("question_uid") or rec.get("question_idx") or "")
+            question_key = rec.get("question_uid") or rec.get("question_idx")
+            question_key = str(question_key) if question_key is not None else ""
             if not question_key or question_key in cache or question_key in recovered:
                 continue
 
@@ -305,15 +314,74 @@ def _path_exists(path: Path) -> bool:
 
 # --- Main ---
 
+@contextmanager
+def generation_lock(results_dir: Path):
+    """The OS releases this single-writer lock when the process exits."""
+    results_dir.mkdir(parents=True, exist_ok=True)
+    with (results_dir / ".generation.lock").open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(f"Another generator is using {results_dir}") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def check_resume_signature(cfg: ExperimentConfig, math_path: Path, prompts_path: Path) -> None:
+    """Refuse to mix saved answers with changed inputs or generation settings."""
+    from dataclasses import asdict
+    signature = {
+        "math_sha256": _sha256(math_path),
+        "prompts_sha256": _sha256(prompts_path),
+        "pipeline_sha256": _sha256(Path(__file__).resolve().parents[1] / "src/pipeline.py"),
+        "sample_size": cfg.sample_size,
+        "num_hint_steps": cfg.num_hint_steps,
+        "seed": cfg.seed,
+        "models": {key: asdict(value) for key, value in MODELS.items()},
+    }
+    path = cfg.results_dir / "run_signature.json"
+    if path.exists():
+        if json.loads(path.read_text()) != signature:
+            raise ValueError("Inputs, prompts, or generation settings changed. Use a new results_dir; "
+                             "do not mix experiments in the existing directory.")
+        return
+    if any(cfg.results_dir.glob("*/*.jsonl")):
+        raise ValueError("Existing outputs have no run_signature.json. Use a new results_dir "
+                         "or verify/migrate those outputs before resuming.")
+    temporary = path.with_suffix(".tmp")
+    with temporary.open("w") as handle:
+        json.dump(signature, handle, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+
+
 def run(
     cfg: ExperimentConfig,
     math_dataset_path: Path,
     attack_prompts_path: Path,
 ):
+    with generation_lock(cfg.results_dir):
+        check_resume_signature(cfg, math_dataset_path, attack_prompts_path)
+        _run(cfg, math_dataset_path, attack_prompts_path)
+
+
+def _run(cfg: ExperimentConfig, math_dataset_path: Path, attack_prompts_path: Path):
     current_results_dir = _safe_resolve(cfg.results_dir)
     resume_source_dirs: list[Path] = []
     seen_resume_sources: set[Path] = set()
-    for candidate in [*cfg.resume_source_dirs, RESULTS_DIR]:
+    # Never silently seed a new experiment from another run's outputs.
+    for candidate in cfg.resume_source_dirs:
         resolved = _safe_resolve(candidate)
         if resolved == current_results_dir or resolved in seen_resume_sources:
             continue
@@ -330,12 +398,10 @@ def run(
         "Prepared %d test cases (%d questions × %d attack prompts)",
         len(test_cases), len(questions), len(attack_prompts),
     )
-
     # --- Run each (model, system) condition ---
     for model_id in cfg.models:
         model_cfg: ModelConfig = MODELS[model_id]
-        logger.info("Loading model: %s (%s)", model_cfg.model_name, model_cfg.backend)
-        model = load_model(model_cfg)
+        model = None  # Fully completed models need no API access or GPU loading.
 
         # Step A cache: avoids re-solving the same question for each
         # TS variant. Saved to disk so restarts skip finished work.
@@ -371,7 +437,10 @@ def run(
                 len(step_a_cache), model_id, step_a_cache_file.name,
             )
 
-        for system_id in cfg.systems:
+        for system_id in systems_for_model(cfg, model_id):
+            # Makes independent full runs better controlled. Resuming changes
+            # the draw sequence; remote API sampling is not controlled here.
+            transformers.set_seed(cfg.seed)
             out_path = _output_path(cfg.results_dir, model_id, system_id)
             if cfg.resume and resume_source_dirs:
                 _seed_resume_file(
@@ -402,6 +471,14 @@ def run(
                     "    Skipping %d already done, %d remaining.",
                     total - len(to_run), len(to_run)
                 )
+
+            if not to_run:
+                logger.info("    Condition complete; no generation needed.")
+                _export_hints_csv(out_path)
+                continue
+            if model is None:
+                logger.info("Loading model: %s (%s)", model_cfg.model_name, model_cfg.backend)
+                model = load_model(model_cfg)
 
             errors = 0
             step_a_pbar = None
@@ -457,7 +534,7 @@ def run(
                             "Error saving result q=%s, atk=%s",
                             result.get("question_idx"), result.get("attack_id"),
                         )
-                        errors += 1
+                        raise
             finally:
                 pbar.close()
                 if step_a_pbar is not None:
@@ -471,6 +548,14 @@ def run(
             # Export a clean CSV of hints for human evaluation
             csv_path = _export_hints_csv(out_path)
             logger.info("  → Hints CSV saved: %s", csv_path)
+
+        # Release the model before loading the next one.
+        del model
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     logger.info("All conditions complete. Results in %s", cfg.results_dir)
 
@@ -488,12 +573,15 @@ def main():
     parser.add_argument(
         "--systems", nargs="+", default=None,
         choices=ALL_SYSTEMS,
-        help="Systems to test (default: all).",
+        help="Systems to test for every selected model (default: config matrix).",
     )
     parser.add_argument(
         "--models", nargs="+", default=None,
         choices=ALL_MODELS,
-        help="Models to use (default: all). Options: llama, general, math.",
+        help=(
+            "Models to use (default: config). Options: general, llama, math, "
+            "deepseek-math."
+        ),
     )
     parser.add_argument(
         "--sample-size", type=int, default=None,
@@ -505,7 +593,7 @@ def main():
     )
     parser.add_argument(
         "--seed", type=int, default=None,
-        help="Legacy sampling seed (kept for compatibility; deterministic sampler ignores it).",
+        help="Local generation seed (default: 42); deterministic dataset sampling ignores it.",
     )
     parser.add_argument(
         "--no-resume", action="store_true",
@@ -539,6 +627,14 @@ def main():
         cfg.systems = list(config_data["systems"])
     if config_data.get("models") is not None:
         cfg.models = list(config_data["models"])
+    if config_data.get("model_systems") is not None:
+        raw_model_systems = config_data["model_systems"]
+        if not isinstance(raw_model_systems, dict):
+            parser.error("model_systems must be a JSON object mapping model ids to system lists")
+        cfg.model_systems = {
+            model_id: list(system_ids)
+            for model_id, system_ids in raw_model_systems.items()
+        }
     cfg.sample_size = int(config_data.get("sample_size", cfg.sample_size))
     cfg.num_hint_steps = int(config_data.get("num_hint_steps", cfg.num_hint_steps))
     cfg.seed = int(config_data.get("seed", cfg.seed))
@@ -554,6 +650,8 @@ def main():
 
     if args.systems:
         cfg.systems = args.systems
+        # An explicit CLI list applies to every selected model.
+        cfg.model_systems = {}
     if args.models:
         cfg.models = args.models
     if args.sample_size:
@@ -566,6 +664,21 @@ def main():
         cfg.resume = False
     if args.batch_size is not None:
         cfg.batch_size = args.batch_size
+
+    unknown_models = sorted(set(cfg.models) - set(ALL_MODELS))
+    if unknown_models:
+        parser.error(f"unknown model id(s) in config: {', '.join(unknown_models)}")
+    unknown_systems = sorted(set(cfg.systems) - set(ALL_SYSTEMS))
+    if unknown_systems:
+        parser.error(f"unknown system id(s) in config: {', '.join(unknown_systems)}")
+    for model_id, system_ids in cfg.model_systems.items():
+        if model_id not in ALL_MODELS:
+            parser.error(f"unknown model id in model_systems: {model_id}")
+        unknown_systems = sorted(set(system_ids) - set(ALL_SYSTEMS))
+        if unknown_systems:
+            parser.error(
+                f"unknown system id(s) for {model_id}: {', '.join(unknown_systems)}"
+            )
 
     math_dataset_path = resolve_config_path(
         config_data.get("math_dataset_path", DEFAULT_MATH_DATASET_PATH),

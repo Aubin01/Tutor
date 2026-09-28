@@ -27,7 +27,7 @@ if [[ ! -f "$DEFAULT_CONFIG" ]]; then
 fi
 
 if [[ ! -f "$MATH_DATASET" ]]; then
-  echo "Building Data/math.json from official MATH source..."
+  echo "Building Data/math.json from the MATH Hugging Face mirror..."
   "$VENV_DIR/bin/python" "$ROOT_DIR/scripts/prepare_math_dataset.py" --output "$MATH_DATASET"
 fi
 

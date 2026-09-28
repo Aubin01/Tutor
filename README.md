@@ -1,6 +1,8 @@
 # Tutor
 
-Tutor contains the code and experimental pipeline for Strong Solvers, Leaky Tutors: Evaluating Answer Leakage in LLM Math Tutors. The project evaluates whether large language models can use mathematical solution context to generate pedagogical hints while withholding final answers.
+Tutor contains the code and experimental pipeline for **Strong Solvers, Leaky Tutors: Evaluating Answer Leakage in LLM Math Tutors**. The project evaluates whether large language models can use mathematical solution context to generate pedagogical hints while withholding final answers.
+
+The paper was accepted at the 2026 ACM/IEEE Joint Conference on Digital Libraries (JCDL '26). [Read the accepted paper](Strong_Solvers_Leaky_Tutors.pdf) or visit the [DOI](https://doi.org/10.1145/3805696.3846495).
 
 ## Quick Start
 
@@ -10,13 +12,15 @@ From the project root:
 ./bin/install
 ./bin/run
 ```
+
+Python 3.10 or newer is required. GPT generation requires an OpenAI API key, and gated Hugging Face models require the appropriate access token. Store credentials in a local `.env` file; never commit them.
+
 ## What These Commands Do
 
 - `./bin/install`
   - creates `.venv`
   - installs dependencies
-  - builds `Data/math.json` (500-problem local dataset)
-
+  - uses the bundled `Data/math.json` dataset, rebuilding it only if missing
 - `./bin/run`
   - runs `scripts/run_experiment.py`
   - runs `scripts/evaluate_results.py`
@@ -24,48 +28,58 @@ From the project root:
 
 ## Output Files
 
-Main outputs are in the `results_dir` from `config/experiment.json` (default: `results/`):
+Main outputs are written to the `results_dir` in `config/experiment.json` (default: `results/`):
 
 - `results/<model>/<system>.jsonl`
 - `results/<model>/<system>_evaluated.jsonl`
 - `results/summary.csv`
 - `results/summary.json`
 
+Generated results are intentionally not tracked by Git.
+
 ## Config
 
-Main config file:
-
-- `config/experiment.json`
-
-Common fields you may change:
+The main configuration file is `config/experiment.json`. Common fields include:
 
 - `sample_size`
 - `models`
 - `systems`
 - `results_dir`
+- `batch_size`
 
-You can also run with another config path:
+To use another configuration file:
 
 ```bash
 ./bin/run /path/to/your_config.json
 ```
 
-## Dataset Note
+Use a new, empty `results_dir` when changing experiment settings.
 
-This repo does not store the full third-party MATH benchmark file.
-Dataset preparation is done locally by `scripts/prepare_math_dataset.py`, which downloads from the official source and creates a deterministic 500-problem subset.
+## Dataset
 
-If you need to rebuild it manually:
+The repository includes the fixed 500-problem MATH subset used by the pipeline, not the full third-party benchmark. It is paired with ten hand-written student prompts, producing 5,000 cases per condition.
+
+To rebuild the subset from the configured Hugging Face mirror:
 
 ```bash
-python scripts/prepare_math_dataset.py
+.venv/bin/python scripts/prepare_math_dataset.py --output Data/math.json
 ```
+
+Dataset details and checksums are documented in [Data/README.md](Data/README.md).
 
 ## Student Prompts
 
-The student prompts in `Data/dataset_b.json` were hand-written to reflect realistic student pressure tactics in tutoring chats (for example: direct answer requests, exam-time urgency, yes/no confirmation, and instruction override attempts). We used these prompts to test whether the tutor policy still avoids final-answer leakage under plausible user behavior, not only under cooperative prompts.
+The prompts in `Data/dataset_b.json` represent realistic student pressure tactics, including direct answer requests, exam-time urgency, yes/no confirmation, and instruction-override attempts. They test whether the tutor avoids final-answer leakage under adversarial as well as cooperative interactions.
 
-## Paper: Strong Solvers, Leaky Tutors: Evaluating Answer Leakage in LLM Math Tutors
+## Reproducibility
 
-Aubin Mugisha and Behrooz Mansouri<br>
+The fixed experiment inputs are included in `Data/`. Fresh model outputs may vary with provider updates, model revisions, hardware, and package versions. Local results and historical research artifacts are excluded from Git.
+
+## Paper
+
+**Strong Solvers, Leaky Tutors: Evaluating Answer Leakage in LLM Math Tutors**
+
+Aubin Mugisha and Behrooz Mansouri
 University of Southern Maine
+
+JCDL '26, October 13–16, 2026, Frisco, Texas, USA

@@ -10,7 +10,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.utils import (
     ALL_SYSTEMS,
@@ -103,11 +103,27 @@ def aggregate(records: list[dict]) -> dict:
     clean_records = records
     n_poisoned = 0
 
-    step_a_values = [
-        record["eval_step_a_correct"]
-        for record in clean_records
-        if record.get("eval_step_a_correct") is not None
-    ]
+    # Step A is generated once per problem and then reused across that
+    # problem's ten student messages. Count each private solution once so the
+    # reported denominator matches the accepted paper (500 solutions), rather
+    # than counting the same solution once per student-facing response.
+    step_a_by_question: dict[str, bool] = {}
+    for record in clean_records:
+        value = record.get("eval_step_a_correct")
+        if value is None:
+            continue
+        question_key = str(
+            record.get("question_uid") or f"idx:{record.get('question_idx')}"
+        )
+        previous = step_a_by_question.get(question_key)
+        if previous is not None and previous != bool(value):
+            logger.warning(
+                "Inconsistent Step A correctness for question %s; using latest value",
+                question_key,
+            )
+        step_a_by_question[question_key] = bool(value)
+
+    step_a_values = list(step_a_by_question.values())
 
     if step_a_values:
         step_a_accuracy = sum(step_a_values) / len(step_a_values)
@@ -149,6 +165,7 @@ def aggregate(records: list[dict]) -> dict:
     }
 
     if step_a_accuracy is not None:
+        summary["n_step_a_solutions"] = len(step_a_values)
         summary["step_a_accuracy"] = step_a_accuracy
         summary["step_a_exclusion_rate"] = 1.0 - step_a_accuracy
 
@@ -249,6 +266,7 @@ def save_summary_csv(all_aggs: dict[str, dict], path: Path) -> None:
         "reasoning_coverage",
         "final_step_coverage",
         "step_a_accuracy",
+        "n_step_a_solutions",
     ]
 
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -276,6 +294,7 @@ def save_summary_csv(all_aggs: dict[str, dict], path: Path) -> None:
                 "reasoning_coverage": agg.get("reasoning_coverage"),
                 "final_step_coverage": agg.get("final_step_coverage"),
                 "step_a_accuracy": agg.get("step_a_accuracy"),
+                "n_step_a_solutions": agg.get("n_step_a_solutions"),
             }
             writer.writerow(row)
     logger.info("Summary CSV saved to %s", path)
@@ -287,7 +306,7 @@ def main() -> None:
         "--config", type=Path, default=None,
         help="Optional JSON config file. CLI flags override config values.",
     )
-    parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
+    parser.add_argument("--results-dir", type=Path, default=None)
     parser.add_argument("--models", nargs="+", default=None)
     parser.add_argument("--systems", nargs="+", default=None, choices=ALL_SYSTEMS)
     args = parser.parse_args()
@@ -297,17 +316,21 @@ def main() -> None:
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         parser.error(str(exc))
 
-    results_dir: Path = (
+    results_dir: Path = args.results_dir or (
         resolve_config_path(config_data["results_dir"], config_base)
         if "results_dir" in config_data
-        else args.results_dir
+        else RESULTS_DIR
     )
     models = config_data.get("models")
     systems = config_data.get("systems")
+    model_systems = config_data.get("model_systems")
+    if model_systems is not None and not isinstance(model_systems, dict):
+        parser.error("model_systems must be a JSON object mapping model ids to system lists")
     if args.models is not None:
         models = args.models
     if args.systems is not None:
         systems = args.systems
+        model_systems = None
 
     all_aggs: dict[str, dict] = {}
     files_to_evaluate: list[tuple[str, str, Path]] = []
@@ -317,12 +340,19 @@ def main() -> None:
         logger.warning("No results to evaluate.")
         return
 
-    model_dirs = sorted(path for path in results_dir.iterdir() if path.is_dir())
+    model_dirs = sorted(
+        path
+        for path in results_dir.iterdir()
+        if path.is_dir() and not path.name.startswith("_")
+    )
     if models:
         model_dirs = [path for path in model_dirs if path.name in models]
 
     for model_dir in model_dirs:
         model_id = model_dir.name
+        configured_systems = systems
+        if isinstance(model_systems, dict) and model_id in model_systems:
+            configured_systems = model_systems[model_id]
         system_files = [
             path
             for path in sorted(model_dir.glob("*.jsonl"))
@@ -331,7 +361,7 @@ def main() -> None:
 
         for system_file in system_files:
             system_id = system_file.stem
-            if systems and system_id not in systems:
+            if configured_systems and system_id not in configured_systems:
                 continue
 
             files_to_evaluate.append((model_id, system_id, system_file))

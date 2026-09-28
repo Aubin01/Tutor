@@ -1,20 +1,35 @@
-*
-!/.gitignore
-!/README.md
-!/requirements.txt
+# Secrets and local environments
+.env
+.env.*
+!.env.example
+.venv/
+venv/
 
-!/bin/
-!/bin/install
-!/bin/run
+# Python caches and build output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
 
-!/config/
-!/config/*.json
+# Generated experiment output (the fixed 500-problem input is versioned)
+/results/
 
-!/scripts/
-!/scripts/*.py
+# Local research evidence and superseded material stay out of Git.
+/archive/
 
-!/src/
-!/src/*.py
+# Local tool state
+/.agents/
+/.codex
+.cache/
 
-!/Data/
-!/Data/dataset_b.json
+# OS, editor, and generated logs
+.DS_Store
+*.log
+*.swp
+*~

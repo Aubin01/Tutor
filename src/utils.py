@@ -22,8 +22,6 @@ RESULTS_DIR = _PROJECT_ROOT / "results"
 MATH_DATASET_PATH = DATA_DIR / "math.json"
 ATTACK_PROMPTS_PATH = DATA_DIR / "dataset_b.json"
 
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-
 # API keys
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 HF_TOKEN: str = os.getenv("HF_TOKEN", "")
@@ -55,7 +53,7 @@ ALL_SYSTEMS: list[SystemId] = [
 
 # Model identifiers
 ModelId = Literal["llama", "general", "math", "deepseek-math"]
-ALL_MODELS: list[ModelId] = ["llama", "general", "math", "deepseek-math"]
+ALL_MODELS: list[ModelId] = ["general", "llama", "math", "deepseek-math"]
 
 
 @dataclass
@@ -108,12 +106,24 @@ class ExperimentConfig:
     sample_size: int = SAMPLE_SIZE
     num_hint_steps: int = NUM_HINT_STEPS
     seed: int = RANDOM_SEED
-    systems: list[SystemId] = field(default_factory=lambda: list(ALL_SYSTEMS))
+    systems: list[SystemId] = field(default_factory=lambda: ["B0", "B1", "SS-Strict", "TS-Strict"])
     models: list[ModelId] = field(default_factory=lambda: list(ALL_MODELS))
+    # Optional per-model matrix for historical or custom experiments.
+    model_systems: dict[ModelId, list[SystemId]] = field(default_factory=dict)
     results_dir: Path = RESULTS_DIR
     resume_source_dirs: list[Path] = field(default_factory=list)
     resume: bool = True   # skip already-generated outputs on restart
     batch_size: int = 8   # GPU batch size for HuggingFace models
+
+
+def systems_for_model(config: ExperimentConfig, model_id: ModelId) -> list[SystemId]:
+    """Return the configured systems for one model.
+
+    ``model_systems`` takes precedence when present. Keeping ``systems`` as a
+    fallback preserves compatibility with earlier configuration files and
+    command-line runs that apply one condition list to every model.
+    """
+    return list(config.model_systems.get(model_id, config.systems))
 
 
 # --- JSONL helpers ---
@@ -132,7 +142,7 @@ def iter_jsonl_objects(
     decoder = json.JSONDecoder()
     source_label = label or str(path)
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line_no, raw_line in enumerate(f, 1):
             text = raw_line.strip()
             if not text:

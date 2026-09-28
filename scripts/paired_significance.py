@@ -1,7 +1,8 @@
 """Paired statistical tests on evaluated results.
 
 Compares systems using McNemar (record-level) and Wilcoxon signed-rank
-(question-level) tests. All p-values are Holm-Bonferroni corrected.
+(question-level) tests. Supports leakage, answer-giving, and tutoring
+compliance. All p-values are Holm-Bonferroni corrected.
 
 Reads *_evaluated.jsonl files produced by evaluate_results.py.
 
@@ -19,9 +20,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.utils import ALL_MODELS, ALL_SYSTEMS, RESULTS_DIR, iter_jsonl_objects, load_config, resolve_config_path
+from src.utils import (
+    ALL_MODELS,
+    ALL_SYSTEMS,
+    ATTACK_PROMPTS_PATH,
+    RESULTS_DIR,
+    iter_jsonl_objects,
+    load_config,
+    resolve_config_path,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +62,22 @@ def _load_evaluated_records(path: Path) -> tuple[dict[tuple[str, str, str], dict
     return records, duplicate_keys
 
 
+def validate_complete_pair(reference: dict, candidate: dict, *,
+                           n_questions: int, n_attacks: int) -> None:
+    """Do not silently report a smaller test family or unbalanced problem counts."""
+    if set(reference) != set(candidate):
+        raise ValueError("Reference and candidate cases are not fully aligned")
+    if len(reference) != n_questions * n_attacks:
+        raise ValueError(f"Expected {n_questions * n_attacks} aligned cases, got {len(reference)}")
+    counts: dict[str, int] = {}
+    for key in reference:
+        counts[key[0]] = counts.get(key[0], 0) + 1
+        if reference[key].get("problem") != candidate[key].get("problem"):
+            raise ValueError(f"Problem mismatch for aligned key {key}")
+    if len(counts) != n_questions or any(n != n_attacks for n in counts.values()):
+        raise ValueError("Expected equal student-message counts for every problem")
+
+
 def _extract_metric_success(record: dict[str, Any], metric: str) -> bool | None:
     if metric == "leakage":
         leaked = record.get("eval_leaked")
@@ -64,6 +89,15 @@ def _extract_metric_success(record: dict[str, Any], metric: str) -> bool | None:
         if compliant is None:
             return None
         return bool(compliant)
+    if metric == "answer_giving":
+        tier = record.get("eval_leak_tier")
+        if tier is not None:
+            return tier not in ("explicit_leak", "format_violation")
+        explicit = record.get("eval_explicit_answer_match")
+        markers = record.get("eval_marker_matches")
+        if explicit is None and markers is None:
+            return None
+        return not (bool(explicit) or bool(markers))
     raise ValueError(f"Unsupported metric: {metric}")
 
 
@@ -74,6 +108,9 @@ def _extract_metric_rate(record: dict[str, Any], metric: str) -> float | None:
     if metric == "compliance":
         compliant = record.get("eval_compliant")
         return None if compliant is None else float(bool(compliant))
+    if metric == "answer_giving":
+        success = _extract_metric_success(record, metric)
+        return None if success is None else float(not success)
     raise ValueError(f"Unsupported metric: {metric}")
 
 
@@ -247,7 +284,7 @@ def paired_test(
     candidate_rate = sum(candidate_rates) / n_pairs
     raw_success_delta = (sum(candidate_values) - sum(reference_values)) / n_pairs
 
-    if metric == "leakage":
+    if metric in ("leakage", "answer_giving"):
         delta_rate = candidate_rate - reference_rate
         improvement_rate = -delta_rate
     else:
@@ -319,7 +356,7 @@ def aggregate_question_counts(
         candidate_counts.append(candidate_sum)
         attack_counts.append(attacks)
 
-        if metric == "leakage":
+        if metric in ("leakage", "answer_giving"):
             improvement_differences.append(reference_sum - candidate_sum)
         else:
             improvement_differences.append(candidate_sum - reference_sum)
@@ -339,7 +376,7 @@ def aggregate_question_counts(
         "n_pairs": n_questions,
         "reference_rate": reference_rate,
         "candidate_rate": candidate_rate,
-        "delta_rate": -mean_rate_delta if metric == "leakage" else mean_rate_delta,
+        "delta_rate": candidate_rate - reference_rate,
         "improvement_rate": mean_rate_delta,
         "reference_mean_count": sum(reference_counts) / n_questions,
         "candidate_mean_count": sum(candidate_counts) / n_questions,
@@ -426,7 +463,11 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run paired significance tests on evaluated outputs.")
     parser.add_argument("--config", type=Path, default=None)
-    parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
+    parser.add_argument("--results-dir", type=Path, default=None)
+    parser.add_argument("--output-prefix", default=None,
+                        help="Output filename prefix inside results_dir (separates test families).")
+    parser.add_argument("--require-complete", action="store_true",
+                        help="Fail on missing conditions, duplicates, or incomplete paired cases.")
     parser.add_argument("--models", nargs="+", default=None, choices=ALL_MODELS)
     parser.add_argument(
         "--reference-system",
@@ -445,7 +486,7 @@ def main() -> None:
         "--metrics",
         nargs="+",
         default=["leakage", "compliance"],
-        choices=["leakage", "compliance"],
+        choices=["leakage", "answer_giving", "compliance"],
     )
     parser.add_argument(
         "--aggregation",
@@ -462,10 +503,10 @@ def main() -> None:
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         parser.error(str(exc))
 
-    results_dir: Path = (
+    results_dir: Path = args.results_dir or (
         resolve_config_path(config_data["results_dir"], config_base)
         if "results_dir" in config_data
-        else args.results_dir
+        else RESULTS_DIR
     )
     models = config_data.get("models")
     if args.models is not None:
@@ -478,10 +519,18 @@ def main() -> None:
         compare_systems = [system for system in ALL_SYSTEMS if system != args.reference_system]
 
     rows: list[dict[str, Any]] = []
+    if args.require_complete:
+        prompt_path = resolve_config_path(
+            config_data.get("attack_prompts_path", ATTACK_PROMPTS_PATH), config_base
+        )
+        n_attacks = len(json.loads(prompt_path.read_text()))
+        n_questions = int(config_data.get("sample_size", 500))
 
     for model_id in models:
         reference_path = _evaluated_path(results_dir, model_id, args.reference_system)
         if not reference_path.exists():
+            if args.require_complete:
+                parser.error(f"Missing reference file: {reference_path}")
             logger.warning("Missing reference file: %s", reference_path)
             continue
 
@@ -493,10 +542,25 @@ def main() -> None:
 
             candidate_path = _evaluated_path(results_dir, model_id, candidate_system)
             if not candidate_path.exists():
+                if args.require_complete:
+                    parser.error(f"Missing candidate file: {candidate_path}")
                 logger.warning("Missing candidate file: %s", candidate_path)
                 continue
 
             candidate_records, candidate_duplicates = _load_evaluated_records(candidate_path)
+            if args.require_complete:
+                if reference_duplicates or candidate_duplicates:
+                    parser.error(f"Duplicate cases in {model_id}/{candidate_system}")
+                try:
+                    validate_complete_pair(reference_records, candidate_records,
+                                           n_questions=n_questions, n_attacks=n_attacks)
+                    for metric in args.metrics:
+                        if any(_extract_metric_rate(r, metric) is None
+                               for records in (reference_records, candidate_records)
+                               for r in records.values()):
+                            raise ValueError(f"Missing evaluation labels for {metric}")
+                except ValueError as exc:
+                    parser.error(f"{model_id}/{candidate_system}: {exc}")
             reference_only = len(set(reference_records) - set(candidate_records))
             candidate_only = len(set(candidate_records) - set(reference_records))
 
@@ -536,10 +600,12 @@ def main() -> None:
 
     output_csv = args.output_csv
     if output_csv is None:
-        output_csv = results_dir / f"paired_significance_{args.reference_system}_{args.aggregation}.csv"
+        prefix = args.output_prefix or f"paired_significance_{args.reference_system}"
+        output_csv = results_dir / f"{prefix}_{args.aggregation}.csv"
     output_json = args.output_json
     if output_json is None:
-        output_json = results_dir / f"paired_significance_{args.reference_system}_{args.aggregation}.json"
+        prefix = args.output_prefix or f"paired_significance_{args.reference_system}"
+        output_json = results_dir / f"{prefix}_{args.aggregation}.json"
 
     _write_csv(rows, output_csv)
     output_json.parent.mkdir(parents=True, exist_ok=True)

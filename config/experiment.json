@@ -5,18 +5,13 @@
   "systems": [
     "B0",
     "B1",
-    "TS-Weak",
-    "TS-Medium",
-    "TS-Strict",
-    "SS-Medium",
-    "SS-Strict"
+    "SS-Strict",
+    "TS-Strict"
   ],
-  "models": ["llama", "general", "math"],
+  "models": ["general", "llama", "math", "deepseek-math"],
   "results_dir": "results",
   "resume": true,
   "batch_size": 8,
   "math_dataset_path": "Data/math.json",
-  "attack_prompts_path": "Data/dataset_b.json",
-  "hint_gain_sample_size": 100,
-  "hint_gain_sample_seed": 13
+  "attack_prompts_path": "Data/dataset_b.json"
 }
